@@ -4,38 +4,37 @@ import distiller.quantization.q_utils as utils
 
 BITS = 6
 SCALE = 30
-CASCADE_FACTOR = 7
-ARR_HEIGHT = 16  # height of the systolic array
+CASCADE_FACTOR = 2
+OVERQ_THRESH = 4
+ARR_HEIGHT = 8  # height of the systolic array
 ACT_LIMIT = int(1e6)  # limit the number of activations for development
-
+Q_MIN, Q_MAX = utils.get_quantized_range(BITS)
+INF = float('inf')
 
 def is_outlier(act):
-    q_min, q_max = utils.get_quantized_range(BITS)
-    q_act = utils.linear_quantize(act, SCALE, 0)
-    representable = q_min < q_act < q_max
+    representable = Q_MIN <= act <= Q_MAX
 
     return not representable
 
 
 def overwrite_downstream(downstream):
-    for act in downstream[:CASCADE_FACTOR]:
+    for act_i, act in enumerate(downstream[:CASCADE_FACTOR]):
         if overwrite_act(act):
+            # Set activation to max so no other activation can overwrite it
+            downstream[act_i] = INF
             return True
     return False
 
 
 def overwrite_act(act):
-    q_min, q_max = utils.get_quantized_range(BITS)
-    q_act = utils.linear_quantize(act, SCALE, 0)
     # I believe this is the method Ritchie discusses in the arxiv
-    small = q_min/4 < q_act < q_max/4
+    small = Q_MIN / OVERQ_THRESH < act < Q_MAX / OVERQ_THRESH
 
     return small
 
 file = open('test_tensor.p', 'rb')
 acts = pickle.load(file)
-
-# TODO: Check that this streaming pattern makes sense, probably not realistic
+acts = utils.linear_quantize(acts, SCALE, 0)
 # Activations in the same output channel to stream in output channel first
 # (B, C, H, W) -> (B, H, W, C)
 acts = acts.permute(0, 2, 3, 1)
@@ -49,12 +48,11 @@ outliers = 0
 covered = 0  # number of outliers covered
 for stream in acts_stream:
     for act_i, act in enumerate(stream):
-        if is_outlier(act):
+        if is_outlier(act) and act != INF: # INF means previously overwritten
             outliers = outliers + 1
             down = stream[act_i+1:]
             if overwrite_downstream(down):
                 covered = covered + 1
-                break
 
 coverage = covered / outliers if outliers > 0 else None
 outlier_ratio = outliers / numel
